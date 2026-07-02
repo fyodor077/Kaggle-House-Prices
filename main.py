@@ -494,6 +494,73 @@ results['MLP (PyTorch)'] = {
     'std_score':  np.std(mlp_scores),
 }
 
+# == Ensemble Blending with Optuna ==
+print(f'\n{"="*40}')
+print('Tuning Ensemble Weights with Optuna...')
+print(f'\n{"="*40}')
+
+def blend_objective(trial):
+    w_ridge = trial.suggest_float('w_Ridge', 0.0, 1.0)
+    w_xgb = trial.suggest_float('w_XGBoost', 0.0, 1.0)
+    w_lgb = trial.suggest_float('w_LightGBM', 0.0, 1.0)
+    w_mlp = trial.suggest_float('w_MLP', 0.0, 1.0)
+
+    total_weights = w_ridge + w_xgb + w_lgb + w_mlp
+    if total_weights == 0:
+        return np.inf
+    
+    w_ridge /= total_weights
+    w_xgb /= total_weights
+    w_lgb /= total_weights
+    w_mlp /= total_weights
+
+    blend_preds = (
+        w_ridge * results['Baseline (Ridge)']['oof_preds'] +
+        w_xgb * results['XGBoost']['oof_preds'] +
+        w_lgb * results['LightGBM']['oof_preds'] +
+        w_mlp * results['MLP (PyTorch)']['oof_preds']
+    )
+    return np.sqrt(mean_squared_error(y_train, blend_preds))
+
+blend_study = optuna.create_study(
+    direction='minimize',
+    sampler=optuna.samplers.TPESampler(seed=CONFIG['seed'])
+)
+blend_study.optimize(blend_objective, n_trials=100, show_progress_bar=True)
+
+best_raw = blend_study.best_params
+total_best_weight = sum(best_raw.values())
+
+best_weights = {
+    'Baseline (Ridge)': best_raw['w_Ridge'] / total_best_weight,
+    'XGBoost': best_raw['w_XGBoost'] / total_best_weight,
+    'LightGBM': best_raw['w_LightGBM'] / total_best_weight,
+    'MLP (PyTorch)': best_raw['w_MLP'] / total_best_weight
+}
+
+print("\nOptimal Weights found by Optuna:")
+for name, w in best_weights.items():
+    print(f"{name:20s} : {w:.4f}")
+
+blend_oof = np.zeros(len(y_train))
+blend_test = np.zeros(len(test_ids))
+
+for name, weight in best_weights.items():
+    blend_oof += weight * results[name]['oof_preds']
+    blend_test += weight * results[name]['test_preds']
+
+blend_rmse = np.sqrt(mean_squared_error(y_train, blend_oof))
+print(f'\nOptimized Ensemble OOF RMSE: {blend_rmse:.4f}')
+
+results['Ensemble (Blend)'] = {
+    'oof_preds':  blend_oof,
+    'test_preds': blend_test,
+    'scores':     [blend_rmse],
+    'mean_score': blend_rmse,
+    'std_score':  0.0,
+}
+
+
 # == Submission ==
 def make_submission(results, test_ids, config):
     best_model_name = min(results, key=lambda x: results[x]['mean_score'])
