@@ -172,20 +172,10 @@ def engineer_features(df, is_train=True, fit_params=None):
 train, fit_params = engineer_features(train, is_train=True)
 test, _= engineer_features(test, is_train=False, fit_params=fit_params)
 
-
-# print("Cols in train:", train.columns.tolist())
-
-
 # -- Target / Features split --
 X_train = train.drop(columns=[CONFIG['target']])
 y_train = train[CONFIG['target']]
 X_test = test.copy()
-
-# print(f'X_train shape: {X_train.shape}')
-# print(f'X_test shape: {X_test.shape}')
-# print(f'y_train shape: {y_train.shape}')
-# print(X_train.isnull().sum().sum(), 'NaN in X_train')
-# print(X_test.isnull().sum().sum(), 'NaN in X_test')
 
 # == Preprocessing ==
 def build_preprocessor(cat_features):
@@ -356,6 +346,149 @@ print('Results Summary')
 print(f'{"="*40}')
 for name, result in results.items():
     print(f'{name:25s} | RMSE: {result["mean_score"]:.4f} ± {result["std_score"]:.4f}')
+
+# == MLP Model ==
+# -- Network architecture --
+class HouseMLP(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+
+            nn.Linear(64, 1)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+    
+    def train_mlp(X_train, y_train, X_test, preprocessor, config):
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        kf = KFold(
+            n_splits=config['n_folds'],
+            shuffle=True,
+            random_state=config['seed']
+        )
+
+        oof_preds = np.zeros(len(X_train))
+        test_preds = np.zeros(len(X_test))
+        scores = []
+
+        for fold, (train_idx, val_idx) in enumerate(kf.split(X_train)):
+            print(f'Fold {fold +1}/{config["n_folds"]}', end=' | ')
+
+# -- Split --
+            X_fold_train = X_train.iloc[train_idx]
+            y_fold_train = y_train.iloc[train_idx].values
+            X_fold_val = X_train.iloc[val_idx]
+            y_fold_val = y_train.iloc[val_idx].values
+
+# -- Preprocessing --
+            fold_preprocessor = clone(preprocessor)
+            X_fold_train_ohe = fold_preprocessor.fit_transform(X_fold_train)
+            X_fold_val_ohe = fold_preprocessor.transform(X_fold_val)
+            X_fold_test_ohe = fold_preprocessor.transform(X_test)
+
+            scaler = StandardScaler()
+            X_fold_train_sc = scaler.fit_transform(X_fold_train_ohe)
+            X_fold_val_sc = scaler.transform(X_fold_val_ohe)
+            X_fold_test_sc = scaler.transform(X_fold_test_ohe)
+
+# -- Tensors --
+            X_tr = torch.FloatTensor(X_fold_train_sc).to(device)
+            y_tr = torch.FloatTensor(y_fold_train).unsqueeze(-1).to(device)
+            X_vl = torch.FloatTensor(X_fold_val_sc).to(device)
+            y_vl = torch.FloatTensor(y_fold_val).unsqueeze(-1).to(device)
+            X_te = torch.FloatTensor(X_fold_test_sc).to(device)
+
+            train_dataset = TensorDataset(X_tr, y_tr)
+            train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+# -- Model --
+            input_dim = X_fold_train_sc.shape[1]
+            model = HouseMLP(input_dim).to(device)
+            criterion == nn.MSELoss()
+            optimizer = torch.optim.Adam(
+                model.parameters(), lr=1e-3, weight_decay=1e-4
+            )
+# -- Early stopping --
+            best_val_rmse = np.inf
+            best_model_weights = None
+            patience = 20
+            patience_counter = 0
+            max_epochs = 30
+
+            for epoch in range(max_epochs):
+                model.train()
+                for X_batch, y_batch in train_loader:
+                    optimizer.zero_grad()
+                    preds = model(X_batch)
+                    loss = criterion(preds, y_batch)
+                    loss.backward()
+                    optimizer.step()
+
+                model.eval()
+                with torch.no_grad():
+                    val_preds = model(X_vl)
+                    val_rmse = torch.sqrt(criterion(val_preds, y_vl)).item()
+                
+                if val_rmse < best_val_rmse:
+                    best_val_rmse = val_rmse
+                    best_model_weights = {
+                        k: v.clone() for k, v in model.state_dict().items()
+                    }
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        break
+            
+# -- Make predictions with best weights --
+            model.load_state_dict(best_model_weights)
+            model.eval()
+            with torch.no_grad():
+                val_final = model(X_vl).cpu().numpy().squeeze()
+                test_final = model(X_te).cpu().numpy().squeeze()
+            
+            fold_score = np.sqrt(mean_squared_error(y_fold_val, val_final))
+            scores.append(fold_score)
+            print(f'RMSE: {fold_score:.4f} | Stopped at epoch: {epoch + 1}')
+
+            oof_preds[val_idx] = val_final
+            test_preds += test_final / config['n_folds']
+        print(f'\nMean RMSE: {np.mean(scores):.4f} ± {np.std(scores):.4f}')
+        print(f'OOF RMSE:  {np.sqrt(mean_squared_error(y_train, oof_preds)):.4f}')
+
+        return oof_preds, test_preds, scores
+    
+# -- Launch MLP --
+print(f'\n{"="*40}')
+print('Model: MLP (PyTorch)')
+print(f'{"="*40}')
+
+mlp_oof, mlp_test_preds, mlp_scores = train_mlp(
+    X_train, y_train, X_test, preprocessor, CONFIG
+)
+results['MLP (PyTorch)'] = {
+    'oof_preds':  mlp_oof,
+    'test_preds': mlp_test_preds,
+    'scores':     mlp_scores,
+    'mean_score': np.mean(mlp_scores),
+    'std_score':  np.std(mlp_scores),
+}
 
 # == Submission ==
 def make_submission(results, test_ids, config):
