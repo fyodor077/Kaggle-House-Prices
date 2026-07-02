@@ -44,8 +44,7 @@ CONFIG = {
         'Exterior2nd', 'MasVnrType', 'Foundation', 'BsmtFinType1',
         'BsmtFinType2', 'BsmtExposure', 'Heating', 'CentralAir',
         'Electrical', 'Functional', 'GarageType', 'GarageFinish',
-        'PavedDrive', 'Fence', 'MiscFeature', 'SaleType', 'SaleCondition',
-        'Neighborhood'
+        'PavedDrive', 'Fence', 'MiscFeature', 'SaleType', 'SaleCondition'
         ],
     'drop_features': ['Id', 'Neighborhood'],
 
@@ -327,3 +326,52 @@ models = {
     'LightGBM': lgb_model,
 }
 
+# == Run CV & Training ==
+results = {}
+
+for name, model in models.items():
+    print(f'\n{"="*40}')
+    print(f'Model: {name}')
+    print(f'{"="*40}')
+
+    oof_preds, test_preds, scores = train_model(
+        model = model,
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        preprocessor=preprocessor,
+        config=CONFIG
+    )
+    results[name] = {
+        'oof_preds': oof_preds,
+        'test_preds': test_preds,
+        'scores': scores,
+        'mean_score': np.mean(scores),
+        'std_score': np.std(scores),
+    }
+
+# == Results Summary ==
+print(f'\n{"="*40}')
+print('Results Summary')
+print(f'{"="*40}')
+for name, result in results.items():
+    print(f'{name:25s} | RMSE: {result["mean_score"]:.4f} ± {result["std_score"]:.4f}')
+
+# == Submission ==
+def make_submission(results, test_ids, config):
+    best_model_name = min(results, key=lambda x: results[x]['mean_score'])
+    best_test_preds = results[best_model_name]['test_preds']
+
+    print(f'\nBest model: {best_model_name}')
+    print(f'Best CV RMSE: {results[best_model_name]["mean_score"]:.4f}')
+
+    submission = pd.DataFrame({
+        'Id': test_ids,
+        'SalePrice': np.expm1(best_test_preds)
+    })
+
+    submission.to_csv('submission.csv', index=False)
+    print(f'\nSubmission saved: submission.csv')
+    print(submission['SalePrice'].describe())
+
+make_submission(results, test_ids, CONFIG)
