@@ -182,9 +182,72 @@ X_train = train.drop(columns=[CONFIG['target']])
 y_train = train[CONFIG['target']]
 X_test = test.copy()
 
-print(f'X_train shape: {X_train.shape}')
-print(f'X_test shape: {X_test.shape}')
-print(f'y_train shape: {y_train.shape}')
-print(X_train.isnull().sum().sum(), 'NaN in X_train')
-print(X_test.isnull().sum().sum(), 'NaN in X_test')
+# print(f'X_train shape: {X_train.shape}')
+# print(f'X_test shape: {X_test.shape}')
+# print(f'y_train shape: {y_train.shape}')
+# print(X_train.isnull().sum().sum(), 'NaN in X_train')
+# print(X_test.isnull().sum().sum(), 'NaN in X_test')
 
+# == Preprocessing ==
+def build_preprocessor(cat_features):
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('ohe', OneHotEncoder(
+                handle_unknown='ignore',
+                sparse_output=False
+            ), cat_features),
+        ],
+        remainder='passthrough'
+    )
+    return preprocessor
+
+preprocessor = build_preprocessor(CONFIG['cat_features'])
+
+# == Cross-Validation & Training ==
+def train_model(model, X_train, y_train, X_test, preprocessor, config, verbose=True):
+    kf = KFold(
+        n_splits=config['n_folds'],
+        shuffle=True,
+        random_state=config['seed']
+    )
+
+    oof_preds = np.zeros(len(X_train))
+    test_preds = np.zeros(len(X_test))
+    scores = []
+
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X_train)):
+        if verbose:
+            print(f'Fold {fold + 1}/{config["n_folds"]}', end=' | ')
+        
+# -- Split --
+        X_fold_train = X_train.iloc[train_idx]
+        y_fold_train = y_train.iloc[train_idx]
+        X_fold_val = X_train.iloc[val_idx]
+        y_fold_val = y_train.iloc[val_idx]
+
+# -- Preprocessing -- 
+        fold_preprocessor = clone(preprocessor)
+        X_fold_train = fold_preprocessor.fit_transform(X_fold_train)
+        X_fold_val = fold_preprocessor.transform(X_fold_val)
+        X_fold_test = fold_preprocessor.transform(X_test)
+
+# -- Training --
+        fold_model = clone(model)
+        fold_model.fit(X_fold_train, y_fold_train)
+
+# -- Validation --
+        val_preds = fold_model.predict(X_fold_val)
+        fold_score = np.sqrt(mean_squared_error(y_fold_val, val_preds))
+        scores.append(fold_score)
+
+        if verbose:
+            print(f'RMSE: {fold_score:.4f}')
+        
+# -- OOF & Test predictions --
+        oof_preds[val_idx] = val_preds
+        test_preds += fold_model.predict(X_fold_test) / config['n_folds']
+    
+    if verbose:
+        print(f'\nMean RMSE: {np.mean(scores):.4f} ± {np.std(scores):.4f}')
+        print(f'OOF RMSE: {np.sqrt(mean_squared_error(y_train, oof_preds)):.4f}')
+    return oof_preds, test_preds, scores
